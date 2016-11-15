@@ -78,8 +78,8 @@ public class Raft<T> implements Runnable {
 	
 	private static final Charset charset = StandardCharsets.UTF_8;
 	private static final long HEARTBEAT_TIMEOUT = 60; // ms
-	private static final long ELECTION_TIMEOUT = 500; // ms
-	private static final long ELECTION_RANDOMIZER = 250; // ms
+	private static final long ELECTION_TIMEOUT = 200; // ms
+	private static final long ELECTION_RANDOMIZER = 150; // ms
 	
 	public Raft(InetSocketAddress[] peers,
 				int me, 
@@ -146,8 +146,6 @@ public class Raft<T> implements Runnable {
 			// check timers
 			long current_time = System.currentTimeMillis();
 			if (current_time > next_election_time && status != Status.LEADER) {
-				log("time difference for election is " + (current_time - next_election_time) 
-						+ " current " + current_time + " election time " + next_election_time);
 				start_election();
 			}
 			if (current_time > next_heartbeat_time && status == Status.LEADER) {
@@ -351,24 +349,25 @@ public class Raft<T> implements Runnable {
 				reply.term = current_term;
 			}
 		}
-		int conflict_index = -1;
+		int last_arg_included_index = -1;
 		for (int i = 0; i < args.entries.size(); i++) {
 			if (args.entries.get(i).log_index >= log.last_included_index) {
-				if (conflict_index == -1) conflict_index = i;
+				if (last_arg_included_index == -1) last_arg_included_index = i;
 				if (args.entries.size() > log.real_log_length()) break;
 				if (args.entries.get(i).term != log.get_term_at_index(args.entries.get(i).log_index)) {
 					// clear up the log if there is a conflict
 					ArrayList<LogEntry<T>> new_log = new ArrayList<>();
-					for (int j = 0; j < args.entries.get(i).log_index - log.last_included_index; j++) {
-						new_log.add(log.log.get(j));
+					for (int j = 1; j < args.entries.get(i).log_index - log.last_included_index; j++) {
+						if (j <= log.real_log_length())
+							new_log.add(log.get(j));
 					}
 					log.log = new_log;
 					break;
 				}
 			}
 		}
-		if (conflict_index != -1) {
-			for (int i = conflict_index; i < args.entries.size(); i++) {
+		if (last_arg_included_index != -1) {
+			for (int i = last_arg_included_index; i < args.entries.size(); i++) {
 				if (args.entries.get(i).log_index > log.real_log_length()) {
 					log.log.add(args.entries.get(i));
 				}
@@ -413,7 +412,7 @@ public class Raft<T> implements Runnable {
 				}
 			}
 		} else {
-			next_index[from] = 1;
+			next_index[from] = 0;
 		}
 		persist();
 	}
@@ -486,16 +485,12 @@ public class Raft<T> implements Runnable {
 	
 	private void send_heartbeats() {
 		if (status != Status.LEADER) return;
-		log("sending heartbeats");
 		reset_timers();
 		for (int i = 0; i < peers.length; i++) {
 			if (i == me) continue;
 			int prev_log_index = next_index[i] - 1;
-			if (prev_log_index <= 0) prev_log_index = 0;
 			int potential_prev_log_term = log.get_term_at_index(prev_log_index);
 			if (potential_prev_log_term == -1) {
-				log("next index is "+ next_index[i] + " prev log index is " + prev_log_index
-						+ " size of log is " + log.real_log_length());
 				send_snapshot_heartbeat();
 			} else {
 				send_append_entry_heartbeat(i, prev_log_index, potential_prev_log_term);
@@ -528,10 +523,8 @@ public class Raft<T> implements Runnable {
 		args.prev_log_term = prev_log_term;
 		args.prev_log_index = prev_log_index;
 		args.entries = new ArrayList<>();
-		for (int j = next_index[i] - 1; j <= log.real_log_length(); j++) {
-			if (j > 0) {
-				args.entries.add(log.get_entry_at(j));
-			}
+		for (int j = prev_log_index + 1; j <= log.real_log_length(); j++) {
+			args.entries.add(log.get(j));
 		}
 		String arg_string = parser.toJson(args, AppendEntryArgs.class);
 		Message msg = new Message(Message.T.APPEND_ENTRY_ARGS, arg_string, i, me);
@@ -545,7 +538,8 @@ public class Raft<T> implements Runnable {
 		match_index = new int[peers.length];
 		next_index = new int[peers.length];
 		for (int i = 0; i < peers.length; i++) {
-			next_index[i] = log.real_log_length() - 1;
+			next_index[i] = log.real_log_length() + 1;
+			match_index[i] = 0;
 		}
 	}
 	
@@ -570,7 +564,7 @@ public class Raft<T> implements Runnable {
 		for (int i = start; i <= max; i++) {
 			LogEntry<T> entry = log.get_entry_at(i);
 			ApplyMsg<T> msg = new ApplyMsg<>(i, entry.command, false, null);
-			log("PUSHING COMMAND AT INDEX " + msg.index);
+			log("PUSHING COMMAND " + msg.command + " AT INDEX " + msg.index);
 			apply_channel.add(msg);
 		}
 	}

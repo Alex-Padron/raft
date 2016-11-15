@@ -14,6 +14,7 @@ public class Log<T> {
 	
 	// returns -1 if we are no longer storing the entry for this term
 	public int get_term_at_index(int index) {
+		if (index < 1) return 0;
 		if (index == last_included_index) {
 			return last_included_term;
 		} else if (index > last_included_index && index <= real_log_length()) {
@@ -21,6 +22,11 @@ public class Log<T> {
 		} else {
 			return -1;
 		}
+	}
+	
+	public LogEntry<T> get(int index) {
+		System.out.println("CHECKING INDEX " + index + " total length " + real_log_length());
+		return log.get(index - 1);
 	}
 	
 	public void wipe() {
