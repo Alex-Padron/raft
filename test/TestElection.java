@@ -12,8 +12,8 @@ public class TestElection {
 	@Test
 	public void test() throws SocketException, InterruptedException {
 		System.out.println("Testing Election no Failures...");
-		final long ELECTION_TIMEOUT = 500;
-		final long DISPERSION_TIMEOUT = 500;
+		final long ELECTION_TIMEOUT = 1000;
+		final long DISPERSION_TIMEOUT = 1000;
 		
 		final int size = 3;
 		InetSocketAddress[] peers = new InetSocketAddress[size];
@@ -26,7 +26,7 @@ public class TestElection {
 		}
 		ArrayList<Raft<Integer>> cluster = new ArrayList<>();
 		for (int i = 0; i < size; i++) {
-			cluster.add(new Raft<Integer>(peers, i, apply_channels.get(i), false));
+			cluster.add(new Raft<Integer>(peers, i, apply_channels.get(i), true));
 		}
 		
 		for (int i = 0; i < size; i++) {
@@ -73,7 +73,7 @@ public class TestElection {
 			}).start();
 		}
 		
-		Thread.sleep(DISPERSION_TIMEOUT * 20);
+		Thread.sleep(DISPERSION_TIMEOUT);
 		
 		for (int i = 0; i < size; i++) {
 			final int j = i;

@@ -78,7 +78,7 @@ public class Raft<T> implements Runnable {
 	
 	private static final Charset charset = StandardCharsets.UTF_8;
 	private static final long HEARTBEAT_TIMEOUT = 60; // ms
-	private static final long ELECTION_TIMEOUT = 250; // ms
+	private static final long ELECTION_TIMEOUT = 500; // ms
 	private static final long ELECTION_RANDOMIZER = 250; // ms
 	
 	public Raft(InetSocketAddress[] peers,
@@ -145,8 +145,11 @@ public class Raft<T> implements Runnable {
 		while (true) {
 			// check timers
 			long current_time = System.currentTimeMillis();
-			if (current_time > next_election_time && status != Status.LEADER)
-				start_election(); 
+			if (current_time > next_election_time && status != Status.LEADER) {
+				log("time difference for election is " + (current_time - next_election_time) 
+						+ " current " + current_time + " election time " + next_election_time);
+				start_election();
+			}
 			if (current_time > next_heartbeat_time && status == Status.LEADER) {
 				send_heartbeats();
 			}
@@ -211,7 +214,6 @@ public class Raft<T> implements Runnable {
 			DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
 			client_socket.receive(packet);
 			String recv_s = new String(packet.getData(), charset).trim();
-			System.out.println(recv_s);
 			Message recieved_message = parser.fromJson(recv_s, Message.class);
 			assert(recieved_message.to == me);
 			switch (recieved_message.type) {
@@ -306,8 +308,9 @@ public class Raft<T> implements Runnable {
 			current_term = args.term;
 			status = Status.FOLLOWER;
 			voted_for = -1;
-			reset_timers();
 		}
+		reset_timers();
+		
 		AppendEntryReply<T> reply = new AppendEntryReply<>();
 		reply.prev_log_index = args.prev_log_index;
 		reply.entries = args.entries; // might need to copy here
@@ -372,8 +375,6 @@ public class Raft<T> implements Runnable {
 			}
 		}
 		
-		reset_timers();
-		
 		if (args.leader_commit > commit_index) {
 			commit_index = Math.min(args.leader_commit, log.real_log_length());
 			send_apply_chan.add(true);
@@ -394,7 +395,6 @@ public class Raft<T> implements Runnable {
 		if (reply.success) {
 			if (match_index[from] < reply.prev_log_index + reply.entries.size()) {
 				match_index[from] = reply.prev_log_index + reply.entries.size();
-				log("updating match index for " + from + " to " + match_index[from]);
 				next_index[from] = match_index[from] + 1;
 				for (int i = 0; i < reply.entries.size(); i++) {
 					int log_index = reply.entries.get(i).log_index;
@@ -402,8 +402,6 @@ public class Raft<T> implements Runnable {
 						replicated_count.put(log_index, new HashSet<>());
 					}
 					replicated_count.get(log_index).add(from);
-					log("log index " + log_index + " now has " 
-							+ replicated_count.get(log_index).size() + " votes");
 					if (replicated_count.get(log_index).size() > (peers.length / 2) &&
 						log_index > commit_index && 
 						log.get_term_at_index(log_index) == current_term) 
@@ -488,12 +486,16 @@ public class Raft<T> implements Runnable {
 	
 	private void send_heartbeats() {
 		if (status != Status.LEADER) return;
+		log("sending heartbeats");
+		reset_timers();
 		for (int i = 0; i < peers.length; i++) {
 			if (i == me) continue;
 			int prev_log_index = next_index[i] - 1;
 			if (prev_log_index <= 0) prev_log_index = 0;
 			int potential_prev_log_term = log.get_term_at_index(prev_log_index);
 			if (potential_prev_log_term == -1) {
+				log("next index is "+ next_index[i] + " prev log index is " + prev_log_index
+						+ " size of log is " + log.real_log_length());
 				send_snapshot_heartbeat();
 			} else {
 				send_append_entry_heartbeat(i, prev_log_index, potential_prev_log_term);
@@ -502,7 +504,7 @@ public class Raft<T> implements Runnable {
 	}
 	
 	private void send_snapshot_heartbeat() {
-		
+		assert(false);
 	}
 	
 	private void start_command(T command) {
@@ -513,9 +515,7 @@ public class Raft<T> implements Runnable {
 			log.log.add(new_entry);
 			Set<Integer> new_set = new HashSet<>();
 			new_set.add(me);
-			replicated_count.put(log.real_log_length(), new_set);
-			log("log is now " + log);
-			log("after starting command, real log length is " + log.real_log_length());
+			replicated_count.put(log.real_log_length(), new_set);;
 			send_command_chan.add(true);
 		}
 	}
