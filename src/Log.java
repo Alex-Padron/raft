@@ -39,4 +39,15 @@ public class Log<T> {
 		if (log.size() == 0) return last_included_term;
 		return log.get(log.size() - 1).term;
 	}
+	
+	@Override
+	public String toString() {
+		String s = "";
+		s += "length: " + log.size();
+		s += "\nstart index: " + log_start_index;
+		s += "\nlast log term: " + last_log_term;
+		s += "\nlast included index: " + last_included_index;
+		s += "\nlast included term: " + last_included_term;
+		return s;
+	}
 }

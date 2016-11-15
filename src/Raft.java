@@ -31,9 +31,9 @@ public class Raft<T> implements Runnable {
 	// given state
 	private final InetSocketAddress[] peers;
 	private final int me;
-	private final Lock mu;
 	private Persister persister;
-	private final Queue<T> apply_channel;
+	private final Queue<ApplyMsg<T>> apply_channel;
+	private final boolean enable_log;
 	
 	// volatile state
 	private int commit_index;
@@ -46,6 +46,7 @@ public class Raft<T> implements Runnable {
 	private Map<Integer, Set<Integer>> replicated_count;
 	private Map<Integer, Boolean> votes_recieved;
 	private int election_number;
+	private Queue<T> start_chan;
 	
 	// persisted state
 	private int current_term;
@@ -61,6 +62,7 @@ public class Raft<T> implements Runnable {
 	
 	private final Queue<Boolean> send_snapshot;
 	private final Queue<Boolean> send_apply_chan;
+	private final Queue<Boolean> send_command_chan;
 	
 	private final Queue<Message> to_send;
 	
@@ -79,18 +81,21 @@ public class Raft<T> implements Runnable {
 	private static final long ELECTION_TIMEOUT = 250; // ms
 	private static final long ELECTION_RANDOMIZER = 250; // ms
 	
-	public Raft(InetSocketAddress[] peers, int me, Queue<T> apply_channel) throws SocketException {
+	public Raft(InetSocketAddress[] peers,
+				int me, 
+				Queue<ApplyMsg<T>> apply_channel, 
+				boolean enable_log) throws SocketException {
 		this.peers = peers;
 		this.client_socket = new DatagramSocket(peers[me]);
 		this.me = me;
 		this.status = Status.FOLLOWER;
-		this.mu = new ReentrantLock();
 		this.apply_channel = apply_channel;
 		this.persister = new Persister();
 		this.rand = new Random();
 		this.parser = new Gson();
 		this.log = new Log<>();
 		this.send_apply_chan = new ConcurrentLinkedQueue<>();
+		this.send_command_chan = new ConcurrentLinkedQueue<>();
 		this.to_send = new ConcurrentLinkedQueue<>();
 		this.request_vote_requests = new ConcurrentLinkedQueue<>();
 		this.request_vote_replies = new ConcurrentLinkedQueue<>();
@@ -101,7 +106,17 @@ public class Raft<T> implements Runnable {
 		this.append_entry_arg_typ = new TypeToken<AppendEntryArgs<T>>(){}.getType();
 		this.append_entry_rep_typ = new TypeToken<AppendEntryReply<T>>(){}.getType();
 		this.send_snapshot = new ConcurrentLinkedQueue<>();
+		this.start_chan = new ConcurrentLinkedQueue<>();
+		this.enable_log = enable_log;
 		reset_timers();
+	}
+	
+	public boolean start(T command) {
+		if (status == Status.LEADER) {
+			start_chan.add(command);
+			return true;
+		}
+		return false;
 	}
 	
 	public void run() {
@@ -178,7 +193,14 @@ public class Raft<T> implements Runnable {
 			// check internal queues 
 			if (send_apply_chan.peek() != null) {
 				send_apply_chan.poll();
-				send_commits_to_apply_channel();
+				push_committed_entries();
+			}
+			if (send_command_chan.peek() != null) {
+				send_command_chan.poll();
+				send_heartbeats();
+			}
+			if (start_chan.peek() != null) {
+				start_command(start_chan.poll());
 			}
 		}
 	}
@@ -189,6 +211,7 @@ public class Raft<T> implements Runnable {
 			DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
 			client_socket.receive(packet);
 			String recv_s = new String(packet.getData(), charset).trim();
+			System.out.println(recv_s);
 			Message recieved_message = parser.fromJson(recv_s, Message.class);
 			assert(recieved_message.to == me);
 			switch (recieved_message.type) {
@@ -223,7 +246,6 @@ public class Raft<T> implements Runnable {
 			Message msg = to_send.poll();
 			if (msg == null) continue;
 			packet.setData(parser.toJson(msg, Message.class).getBytes(charset));
-			String recv_s = new String(packet.getData(), charset);
 			packet.setSocketAddress(peers[msg.to]);
 			client_socket.send(packet);
 		}
@@ -372,6 +394,7 @@ public class Raft<T> implements Runnable {
 		if (reply.success) {
 			if (match_index[from] < reply.prev_log_index + reply.entries.size()) {
 				match_index[from] = reply.prev_log_index + reply.entries.size();
+				log("updating match index for " + from + " to " + match_index[from]);
 				next_index[from] = match_index[from] + 1;
 				for (int i = 0; i < reply.entries.size(); i++) {
 					int log_index = reply.entries.get(i).log_index;
@@ -379,12 +402,15 @@ public class Raft<T> implements Runnable {
 						replicated_count.put(log_index, new HashSet<>());
 					}
 					replicated_count.get(log_index).add(from);
+					log("log index " + log_index + " now has " 
+							+ replicated_count.get(log_index).size() + " votes");
 					if (replicated_count.get(log_index).size() > (peers.length / 2) &&
 						log_index > commit_index && 
 						log.get_term_at_index(log_index) == current_term) 
 					{
 						commit_index = log_index;
-						send_to_apply_chan();
+						log("COMMIT INDEX: " + commit_index);
+						push_committed_entries();
 					}
 				}
 			}
@@ -438,7 +464,7 @@ public class Raft<T> implements Runnable {
 		election_number++;
 		votes_recieved.put(me, true);
 		voted_for = me;
-		System.out.println("Server "+ me + " starting election for term " + current_term);
+		log("START ELECTION FOR TERM " + current_term);
 		reset_timers();
 		int last_log_entry_term;
 		if (log.real_log_length() == 0) {
@@ -470,7 +496,7 @@ public class Raft<T> implements Runnable {
 			if (potential_prev_log_term == -1) {
 				send_snapshot_heartbeat();
 			} else {
-				send_append_entry_heartbeat(i, potential_prev_log_term);
+				send_append_entry_heartbeat(i, prev_log_index, potential_prev_log_term);
 			}
 		}
 	}
@@ -478,30 +504,42 @@ public class Raft<T> implements Runnable {
 	private void send_snapshot_heartbeat() {
 		
 	}
+	
+	private void start_command(T command) {
+		if (status == Status.LEADER) {
+			int index = log.real_log_length() + 1;
+			log("STARTING COMMAND IN TERM " + current_term + " AT INDEX " + index);
+			LogEntry<T> new_entry = new LogEntry<>(command, current_term, index);
+			log.log.add(new_entry);
+			Set<Integer> new_set = new HashSet<>();
+			new_set.add(me);
+			replicated_count.put(log.real_log_length(), new_set);
+			log("log is now " + log);
+			log("after starting command, real log length is " + log.real_log_length());
+			send_command_chan.add(true);
+		}
+	}
 
-	private void send_append_entry_heartbeat(int i, int prev_log_term) {
+	private void send_append_entry_heartbeat(int i, int prev_log_index, int prev_log_term) {
 		AppendEntryArgs<T> args = new AppendEntryArgs<>();
 		args.term = current_term;
 		args.leader_id = me;
 		args.leader_commit = commit_index;
 		args.prev_log_term = prev_log_term;
-		args.prev_log_index = next_index[i] - 1;
+		args.prev_log_index = prev_log_index;
 		args.entries = new ArrayList<>();
-		for (int j = next_index[i]; j < log.real_log_length(); j++) {
-			if (j > 0)
+		for (int j = next_index[i] - 1; j <= log.real_log_length(); j++) {
+			if (j > 0) {
 				args.entries.add(log.get_entry_at(j));
+			}
 		}
 		String arg_string = parser.toJson(args, AppendEntryArgs.class);
 		Message msg = new Message(Message.T.APPEND_ENTRY_ARGS, arg_string, i, me);
 		to_send.add(msg);
 	}
 	
-	private void send_to_apply_chan() {
-		
-	}
 	private void initialize_as_leader() {
-		System.out.println("Server " + me + 
-				" became leader for term " + current_term);
+		log("BECAME LEADER TERM " + current_term);
 		status = Status.LEADER;
 		replicated_count = new HashMap<>();
 		match_index = new int[peers.length];
@@ -525,14 +563,26 @@ public class Raft<T> implements Runnable {
 		
 	}
 	
-	private void send_commits_to_apply_channel() {
-		
+	private void push_committed_entries() {
+		int start = last_applied + 1;
+		int max = commit_index;
+		last_applied = commit_index;
+		for (int i = start; i <= max; i++) {
+			LogEntry<T> entry = log.get_entry_at(i);
+			ApplyMsg<T> msg = new ApplyMsg<>(i, entry.command, false, null);
+			log("PUSHING COMMAND AT INDEX " + msg.index);
+			apply_channel.add(msg);
+		}
 	}
 	
 	public boolean is_leader() {
 		return status == Status.LEADER;
 	}
 	
+	private void log(String s) {
+		if (enable_log) 
+			System.out.println("SERVER: " + me + " " + s);
+	}
 	
 	public void persist() {
 		
