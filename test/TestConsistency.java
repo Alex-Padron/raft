@@ -1,6 +1,11 @@
 import org.junit.Test;
+
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -9,10 +14,10 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-public class TestElection {
-
+public class TestConsistency {
+	
 	@Test
-	public void test() throws SocketException, InterruptedException {
+	public void test() throws InterruptedException, UnknownHostException, IOException {
 		System.out.println("Testing Election no Failures...");
 		final long ELECTION_TIMEOUT = 1000;
 		final long DISPERSION_TIMEOUT = 1000;
@@ -103,7 +108,7 @@ public class TestElection {
 		for (int i = 0; i < num_threads; i++) {
 			new Thread(new Runnable() {
 				public void run() {
-					for (double k = 0; k < num_inserts; k++) {
+					for (double k = 0; k < num_inserts + 50; k++) {
 						assert(cluster.get(f_leader_index)).start(k);
 					}
 				}

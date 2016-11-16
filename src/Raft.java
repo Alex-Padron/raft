@@ -80,6 +80,7 @@ public class Raft<T> implements Runnable {
 	private static final long HEARTBEAT_TIMEOUT = 60; // ms
 	private static final long ELECTION_TIMEOUT = 200; // ms
 	private static final long ELECTION_RANDOMIZER = 150; // ms
+	private static final int MAX_ENTRIES_PER_PACKET = 5;
 	
 	public Raft(InetSocketAddress[] peers,
 				int me, 
@@ -523,7 +524,9 @@ public class Raft<T> implements Runnable {
 		args.prev_log_term = prev_log_term;
 		args.prev_log_index = prev_log_index;
 		args.entries = new ArrayList<>();
-		for (int j = prev_log_index + 1; j <= log.real_log_length(); j++) {
+		int last_entry_index = 
+				Math.min(prev_log_index + 1 + MAX_ENTRIES_PER_PACKET, log.real_log_length());
+		for (int j = prev_log_index + 1; j <= last_entry_index; j++) {
 			args.entries.add(log.get(j));
 		}
 		String arg_string = parser.toJson(args, AppendEntryArgs.class);
