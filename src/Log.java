@@ -25,7 +25,6 @@ public class Log<T> {
 	}
 	
 	public LogEntry<T> get(int index) {
-		System.out.println("CHECKING INDEX " + index + " total length " + real_log_length());
 		return log.get(index - 1);
 	}
 	

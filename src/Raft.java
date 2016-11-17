@@ -1,10 +1,6 @@
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 import java.net.SocketException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -16,8 +12,6 @@ import java.util.Queue;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
@@ -29,7 +23,7 @@ public class Raft<T> implements Runnable {
 		LEADER,
 	}
 	// given state
-	private final InetSocketAddress[] peers;
+	private final RaftSocket[] peers;
 	private final int me;
 	private Persister persister;
 	private final Queue<ApplyMsg<T>> apply_channel;
@@ -58,7 +52,6 @@ public class Raft<T> implements Runnable {
 	private long next_election_time;
 	private final Random rand;
 	private final Gson parser;
-	private final DatagramSocket client_socket;
 	
 	private final Queue<Boolean> send_snapshot;
 	private final Queue<Boolean> send_apply_chan;
@@ -78,16 +71,15 @@ public class Raft<T> implements Runnable {
 	
 	private static final Charset charset = StandardCharsets.UTF_8;
 	private static final long HEARTBEAT_TIMEOUT = 60; // ms
-	private static final long ELECTION_TIMEOUT = 200; // ms
-	private static final long ELECTION_RANDOMIZER = 150; // ms
+	private static final long ELECTION_TIMEOUT = 250; // ms
+	private static final long ELECTION_RANDOMIZER = 500; // ms
 	private static final int MAX_ENTRIES_PER_PACKET = 5;
 	
-	public Raft(InetSocketAddress[] peers,
+	public Raft(RaftSocket[] peers,
 				int me, 
 				Queue<ApplyMsg<T>> apply_channel, 
 				boolean enable_log) throws SocketException {
 		this.peers = peers;
-		this.client_socket = new DatagramSocket(peers[me]);
 		this.me = me;
 		this.status = Status.FOLLOWER;
 		this.apply_channel = apply_channel;
@@ -211,9 +203,12 @@ public class Raft<T> implements Runnable {
 		while (true) {
 			byte[] buffer = new byte[1024];
 			DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-			client_socket.receive(packet);
+			peers[me].receive(packet);
 			String recv_s = new String(packet.getData(), charset).trim();
 			Message recieved_message = parser.fromJson(recv_s, Message.class);
+			if (recieved_message.to != me) {
+				log("got a message meant for " + recieved_message.to);
+			}
 			assert(recieved_message.to == me);
 			switch (recieved_message.type) {
 			case REQUEST_VOTE_ARGS:
@@ -242,13 +237,14 @@ public class Raft<T> implements Runnable {
 
 	private void spin_socket_sends() throws IOException {
 		byte[] buffer = new byte[1024];
-		DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+		DatagramPacket packet;
 		while (true) {
 			Message msg = to_send.poll();
 			if (msg == null) continue;
+			packet = new DatagramPacket(buffer, buffer.length);
 			packet.setData(parser.toJson(msg, Message.class).getBytes(charset));
-			packet.setSocketAddress(peers[msg.to]);
-			client_socket.send(packet);
+			packet.setSocketAddress(peers[msg.to].get_addr());
+			peers[me].send(packet);
 		}
 	}
 
@@ -489,6 +485,7 @@ public class Raft<T> implements Runnable {
 		reset_timers();
 		for (int i = 0; i < peers.length; i++) {
 			if (i == me) continue;
+			if (next_index[i] < 1) next_index[i] = 1;
 			int prev_log_index = next_index[i] - 1;
 			int potential_prev_log_term = log.get_term_at_index(prev_log_index);
 			if (potential_prev_log_term == -1) {
